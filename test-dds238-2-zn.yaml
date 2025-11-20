@@ -1,42 +1,61 @@
 substitutions:
-  friendly_name: "test-dds238"
-  friendly_name_wifiap: "test-dds238-Hotspot"
-  interval_update_court: "10s"
-  interval_update_normal: "120s"
-  interval_update_long: "300s"
-  reboot_time: "300min"
+  device_name: "dds238-2-zn-rs485"
+  device_friendly_name: "dds238-2-zn"
+  device_description: "Energy meter"
+  
+  friendly_name_wifiap: "dds238-Hotspot"
+  
+  
+  reboot_time: "30min"
 
 esphome:
-  name: test-dds238-2-zn
-  friendly_name: test-dds238-2-zn
-
-esp32:
-  board: esp32dev
-  framework:
-    type: arduino
+  name: $device_name
+  friendly_name: $device_friendly_name
+  comment: $device_description
+  name_add_mac_suffix: false
+  project:
+    name: "framenic.dds238-2-zn-rs485"
+    version: "1.0.0"
+esp8266:
+  board: esp01_1m
 
 # Enable logging
 logger:
+  level: INFO
+  # Disable logging via UART, since we're using this for modbus communication
+  baud_rate: 0
+
+mqtt:
+  broker: 10.26.9.1
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  discovery: false
+  reboot_timeout: 0s
+  topic_prefix: null
+
 
 # Enable Home Assistant API
 api:
-  encryption:
-    key: "WF0x+wj3AFxqMx4kgWOTJP6uA6+IYmJSkO21Lq7TgVI="
+#  encryption:
+#    key: !secret home_assistant_key
+#  reboot_timeout: 0s
 
 ota:
-  password: "7aefbfe33d091034c2f807f6f6caac5a"
-
+  - platform: esphome
+    #password: !secret ota_password
+    
 wifi:
   networks:
-  - ssid: !secret wifi_maison_ssid
-    password: !secret wifi_maison_password
-  - ssid: !secret wifi_maison_2_ssid
-    password: !secret wifi_maison_2_password
+  - ssid: !secret wifi_ssid1
+    password: !secret wifi_password1
+  - ssid: !secret wifi_ssid2
+    password: !secret wifi_password2
+    
   reboot_timeout : ${reboot_time} #reboot si pas de wifi actif
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "${friendly_name_wifiap}"
-    password: !secret wifi_esp_ap_password
+    password: ""
 
 
 captive_portal:
@@ -45,18 +64,20 @@ captive_portal:
 #--------------------------------------
 web_server:
   port: 80
-  version: 2
+  local: true
+  log: false
 
 uart:
   id: mod_bus
-  tx_pin: 17
-  rx_pin: 16
+  tx_pin: GPIO1
+  rx_pin: GPIO3
   baud_rate: 9600
+  data_bits: 8
   stop_bits: 1
+  parity: none
 
 modbus:
   #send_wait_time: 500ms
-  #flow_control_pin: 5
   id: modbus1
   #uart_id: mod_bus
 
@@ -66,9 +87,53 @@ modbus_controller:
     address: 0x1
     modbus_id: modbus1
     setup_priority: -10
-    update_interval: 5s
+    update_interval: 1s
+    command_throttle: 5ms
 
 sensor:
+  - platform: modbus_controller
+    modbus_controller_id: hikingdds238_general
+    name: "Total Energy"
+    id: total_energy
+    register_type: holding
+    address: 0x0000
+    state_class: "total_increasing"
+    device_class: "energy"
+    unit_of_measurement: "kWh"
+    value_type: U_DWORD
+    accuracy_decimals: 2
+    filters:
+    - multiply: 0.01 #1/100
+    register_count: 8
+
+  - platform: modbus_controller
+    modbus_controller_id: hikingdds238_general
+    name: "Export Energy"
+    id: export_energy
+    register_type: holding
+    address: 0x0008
+    state_class: "total_increasing"
+    device_class: "energy"
+    unit_of_measurement: "kWh"
+    value_type: U_DWORD
+    accuracy_decimals: 2
+    filters:
+    - multiply: 0.01 #1/100
+
+  - platform: modbus_controller
+    modbus_controller_id: hikingdds238_general
+    name: "Import Energy"
+    id: import_energy
+    register_type: holding
+    state_class: "total_increasing"
+    device_class: "energy"
+    address: 0x000A
+    unit_of_measurement: "kWh"
+    value_type: U_DWORD
+    accuracy_decimals: 2
+    filters:
+    - multiply: 0.01 #1/100    
+
   - platform: modbus_controller
     modbus_controller_id: hikingdds238_general
     name: "Voltage"
@@ -95,44 +160,61 @@ sensor:
 
   - platform: modbus_controller
     modbus_controller_id: hikingdds238_general
-    name: "Puissance"
-    id: Puissance
+    name: "Active Power"
+    id: active_power
     register_type: holding
     address: 0x000E
     unit_of_measurement: "W"
     value_type: S_WORD
-    #accuracy_decimals: 2
+    #accuracy_decimals: 1
     #filters:
-    #- multiply: 0.01 #1/100
-
+    #- multiply: 0.1 #1/10
+    on_value:
+        - mqtt.publish_json:
+            topic: "state/dds238-2/data"
+            payload: |-
+              root["grid"]["power"]          = (float)id(active_power).state;
+              root["grid"]["voltage"]        = (float)id(Voltage).state;
+              root["grid"]["current"]        = (float)id(Current).state;
+              root["grid"]["energy_forward"] = (float)id(import_energy).state;
+              root["grid"]["energy_reverse"] = (float)id(export_energy).state;
+              root["grid"]["L1"]["power"]    = (float)id(active_power).state;
+              root["grid"]["L1"]["voltage"]  = (float)id(Voltage).state;
+              root["grid"]["L1"]["current"]  = (float)id(Current).state;
+              root["grid"]["L1"]["frequency"]  = (float)id(frequency).state;
+              root["grid"]["L1"]["power_factor"]  = (float)id(power_factor).state;
+              root["grid"]["L1"]["energy_forward"]  = (float)id(import_energy).state;
+              root["grid"]["L1"]["energy_reverse"]  = (float)id(export_energy).state;
+              
+              
   - platform: modbus_controller
     modbus_controller_id: hikingdds238_general
-    name: "Puissance Apparente"
-    id: Puissance_Apparente
+    name: "Reactive Power"
+    id: reactive_power
     register_type: holding
     address: 0x000F
-    unit_of_measurement: "var"
+    unit_of_measurement: "VAr"
     value_type: U_WORD
-    #accuracy_decimals: 2
+    #accuracy_decimals: 1
     #filters:
-    #- multiply: 0.01 #1/100
+    #- multiply: 0.1 #1/100
 
   - platform: modbus_controller
     modbus_controller_id: hikingdds238_general
-    name: "Facteur Puissance"
-    id: Facteur_Puissance
+    name: "Power factor"
+    id: power_factor
     register_type: holding
     address: 0x0010
     #unit_of_measurement: "var"
     value_type: U_WORD
-    #accuracy_decimals: 2
+    accuracy_decimals: 2
     filters:
     - multiply: 0.001 #1/1000
 
   - platform: modbus_controller
     modbus_controller_id: hikingdds238_general
-    name: "Frequence"
-    id: Frequence
+    name: "Frequency"
+    id: frequency
     register_type: holding
     address: 0x0011
     unit_of_measurement: "Hz"
@@ -140,56 +222,15 @@ sensor:
     accuracy_decimals: 2
     filters:
     - multiply: 0.01 #1/100
-
-  - platform: modbus_controller
-    modbus_controller_id: hikingdds238_general
-    name: "Energy Total"
-    id: Energy_Total
-    register_type: holding
-    address: 0x0000
-    state_class: "total_increasing"
-    device_class: "energy"
-    unit_of_measurement: "kWh"
-    value_type: U_DWORD
-    accuracy_decimals: 2
-    filters:
-    - multiply: 0.01 #1/100
-
-  - platform: modbus_controller
-    modbus_controller_id: hikingdds238_general
-    name: "Energy Export"
-    id: Energy_Export
-    register_type: holding
-    address: 0x0008
-    state_class: "total_increasing"
-    device_class: "energy"
-    unit_of_measurement: "kWh"
-    value_type: U_DWORD
-    accuracy_decimals: 2
-    filters:
-    - multiply: 0.01 #1/100
-
-  - platform: modbus_controller
-    modbus_controller_id: hikingdds238_general
-    name: "Energy Import"
-    id: Energy_Import
-    register_type: holding
-    state_class: "total_increasing"
-    device_class: "energy"
-    address: 0x000A
-    unit_of_measurement: "kWh"
-    value_type: U_DWORD
-    accuracy_decimals: 2
-    filters:
-    - multiply: 0.01 #1/100    
-
+  
 switch:
-  #https://community.home-assistant.io/t/schneider-iem3155-energy-meter-sending-modbus-custom-command/444952/4
-  - platform: modbus_controller
-    modbus_controller_id: hikingdds238_general
-    name: "Reset command"
-    id: reset_partial
-    custom_command: [ 0x01, 0x10, 0x00, 0x0a, 0x00, 0x02, 0x04, 0x00, 0x00 ]
+#  #https://community.home-assistant.io/t/schneider-iem3155-energy-meter-sending-modbus-custom-command/444952/4
+#  - platform: modbus_controller
+#    modbus_controller_id: hikingdds238_general
+#    name: "Reset energy counters"
+#    id: reset_energy_counters
+#    custom_command: [ 0x01, 0x10, 0x00, 0x0a, 0x00, 0x02, 0x04, 0x00, 0x00 ]
+#    internal: true
 
 #text_sensor:
 #  - name: "rtc_clock"
@@ -217,15 +258,25 @@ text_sensor:
 #wifi   
   - platform: wifi_info
     ip_address:
-      name: "${friendly_name} Local IP"
+      name: "${device_friendly_name} Local IP"
     ssid:
-      name: "${friendly_name} SSID"
+      name: "${device_friendly_name} SSID"
 
 #----------------------------------------------------------------------------------------------
 #----------------------------------------------------------------------------------------------
-#bouton
 button:
   - platform: restart
-    name: "${friendly_name} Restart"
-
+    name: "${device_friendly_name} Restart"
     
+  - platform: template
+    name: "Reset energy counters"
+    on_press:
+    - lambda: |-
+          std::vector<uint16_t> reset_data = {0x0000};
+          esphome::modbus_controller::ModbusController *controller = id(hikingdds238_general);
+          // Create a ModBUS command item with the payload
+          esphome::modbus_controller::ModbusCommandItem reset_energy_command =
+                      esphome::modbus_controller::ModbusCommandItem::create_write_multiple_command(controller, 0x00, 1, reset_data);
+          // Submit the command to the send queue
+          hikingdds238_general->queue_command(reset_energy_command);
+          
